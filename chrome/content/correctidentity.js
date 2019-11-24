@@ -1,3 +1,18 @@
+//
+// This add the ability for CorrectIdentity to use the email in the "X-Apparently-To" header.
+// This header is set by Yahoo and contains the Disposable Email Address
+// to which the email has been sent to.
+// 
+// So that this patch (XAppToSupport) does work it isn't needed anymore that X-Apparently-To is 
+// displayed in the Message pane of thunderbird by adding this to prefs.js
+// ( "mailnews.headers.extraExpandedHeaders" , "X-Apparently-To" )
+// 
+// However, if one want's to display the header in the GUI, it is sufficient to add this line in prefs.js
+// ( "mailnews.headers.extraExpandedHeaders" , "X-Apparently-To" )
+// 
+// cf http://kb.mozillazine.org/Custom_headers
+//
+
 var CorrectIdentity = {
 
   /*** GENERAL ***/
@@ -312,12 +327,18 @@ var CorrectIdentity = {
 
   delayedInit: function()
   {
+    // XAppToSupport DEBUG
+    //Components.classes["@mozilla.org/consoleservice;1"]
+    //  .getService(Components.interfaces.nsIConsoleService)
+    //  .logStringMessage("XAppToSupport DEBUG Correct Identity : delayedInit\n");
+
     if (window.MailUtils.getIdentityForServer && (window.CorrectIdentity.origgetIdentityForServer == null))
     {
       // Overlay function getIdentityForServer of chrome://messenger/content/mailCommands.js (mail/base/content/mailCommands.js)
       window.CorrectIdentity.origgetIdentityForServer = window.getIdentityForServer;
       window.MailUtils.getIdentityForServer = window.CorrectIdentity.getIdentityForServer;
 
+      // XAppToSupport : To comment out?
       let appInfo = Components.classes['@mozilla.org/xre/app-info;1'].getService(Components.interfaces.nsIXULAppInfo);
       window.CorrectIdentity.lastHintIsDeliveredTo = (appInfo.name == 'Thunderbird') && (parseInt(appInfo.version, 10) >= 13);
     }
@@ -356,6 +377,12 @@ var CorrectIdentity = {
       window.CorrectIdentity.origSendMessageLater = window.SendMessageLater;
       window.SendMessageLater = window.CorrectIdentity.SendMessageLater;
     }
+    // XAppToSupport : Adding another overlay to manage "X-Apparently-To" header
+    if (window.MailUtils.getIdentityForHeader && (window.CorrectIdentity.origgetIdentityForHeader == null)) {
+      // Overlay function MailUtils.getIdentityForHeader of (comm/mail/base/modules/MailUtils.jsm)
+      window.CorrectIdentity.origgetIdentityForHeader = window.MailUtils.getIdentityForHeader;
+      window.MailUtils.getIdentityForHeader = window.CorrectIdentity.getIdentityForHeader;
+    }
   },
 
   lastHintIsDeliveredTo: false,
@@ -381,9 +408,16 @@ var CorrectIdentity = {
     // Second, if prefered to reply from a receiving identity and we have a hint that does not contain
     // the currently selected identity's email address, then enumerate the email addresses ans aliases
     // of all identities available from last till first and return the last one that exists in the hint
+
+    // XAppToSupport
+    //Components.classes["@mozilla.org/consoleservice;1"]
+    //  .getService(Components.interfaces.nsIConsoleService)
+    //  .logStringMessage("optionalHint :\n" + optionalHint);
+
     if (optionalHint && oAccountPreferences.replyFromRecipient)
     {
       // Remove Delivered-To address always hinted last since TB 13, with thanks to azurewelkin for detecting this!
+      // XAppToSupport : Comment out both lines bellow ? Doesn't seem necessary
       if (window.CorrectIdentity.lastHintIsDeliveredTo)
         optionalHint = optionalHint.replace(/,[^,]*$/, '');
 
@@ -570,8 +604,152 @@ var CorrectIdentity = {
   SendMessageLater: function() {
     if (window.CorrectIdentity.SendConfirm())
       window.CorrectIdentity.origSendMessageLater.apply(this, arguments);
-  }
+  },
 
+  //XAppToSupport : Support also X-Apparently-To
+  origgetIdentityForHeader: null,
+  /**
+   * Get the identity for the given header.
+   * @param hdr nsIMsgHdr message header
+   * @param type nsIMsgCompType compose type the identity is used for.
+   */
+  getIdentityForHeader(hdr, type, hint = "") {
+    // Copied and adapted, taken from thunderbird sources 68.2.2 expcpet where XAppToSupport is mentioned
+    // Source: thunderbird-68.2.2/comm/mail/base/modules/MailUtils.jsm
+
+    let server = null;
+    let identity = null;
+    let folder = hdr.folder;
+    if (folder) {
+      server = folder.server;
+      identity = folder.customIdentity;
+      if (identity) {
+        return identity;
+      }
+    }
+
+    //XAppToSupport
+    function findXApparentlyToIdentityEmail() {
+        // Get the x-apparently-to header.
+        // Initially inspired by findDeliveredToIdentityEmail 
+        // from file "comm/mail/base/content/mailCommands.js"
+        // But I don't manage to use "currentHeaderData" with version 68.0
+        // So I use hdr.getProperty("x-apparently-to")
+
+        //Components.classes["@mozilla.org/consoleservice;1"]
+        //.getService(Components.interfaces.nsIConsoleService)
+        //.logStringMessage("hdr.getProperty(\"x-apparently-to\")" + hdr.getProperty("x-apparently-to"));
+
+        let x_app_to = "";
+        x_app_to =  hdr.getProperty("x-apparently-to").toLowerCase().trim().split(";")[0].trim();
+
+        Components.classes["@mozilla.org/consoleservice;1"]
+        .getService(Components.interfaces.nsIConsoleService)
+        .logStringMessage("x-apparently-to's :\n" + x_app_to);
+
+        return x_app_to;
+    }
+
+    //XAppToSupport
+    function addXApparentlyToToServer(server) {
+        // Inspired by "getBestIdentity" from "comm/mail/base/modules/MailUtils.jsm"
+        // Add the address in header "X-apparentyly-to" to the addresses of the identity
+        let x_app_to = "";
+        let found = false;
+        x_app_to = findXApparentlyToIdentityEmail();
+
+        var identities = accountManager.getIdentitiesForServer(server);
+        let identityCount = identities.length;
+        if (identityCount < 1)
+            return null;
+        if (!x_app_to)
+            return null;
+
+        // If we have more than one identity and a hint to help us pick one.
+        if (identityCount >= 1) {
+            // Normalize case on the optional hint to improve our chances of
+            // finding a match.
+            let hints = x_app_to.toLowerCase();
+
+            for (let identity of fixIterator(identities,
+                Components.interfaces.nsIMsgIdentity)) {
+
+                //Components.classes["@mozilla.org/consoleservice;1"]
+                //   .getService(Components.interfaces.nsIConsoleService)
+                //   .logStringMessage("addXApparentlyToToServer / x_app_to: " + x_app_to + 
+                //   " /server: " + server + " /identity: " + identity);
+
+                if (!identity.email)
+                    continue;
+                if (hints.trim() == identity.email.toLowerCase())
+                    found = true;
+                }
+            if (!found) {
+                var new_identity = accountManager.createIdentity();
+                var account = accountManager.FindAccountForServer(server);
+                var defaultIdentity = account.defaultIdentity;
+
+                new_identity.copy(defaultIdentity);
+                new_identity.email=x_app_to;
+                new_identity.doBccList = defaultIdentity.doBccList;
+                new_identity.doBcc = defaultIdentity.doBcc;
+                //new_identity.fullName = defaultIdentity.fullName;
+                //new_identity.fullName = x_app_to;
+
+                Components.classes["@mozilla.org/consoleservice;1"]
+                .getService(Components.interfaces.nsIConsoleService)
+                .logStringMessage("addXApparentlyToToServer / new_identity: " + new_identity +
+                " /X-Apparently-To: " + x_app_to);
+
+                account.addIdentity(new_identity);
+            }
+        }
+    }
+
+    if (!server) {
+      let accountKey = hdr.accountKey;
+      if (accountKey) {
+        let account = MailServices.accounts.getAccount(accountKey);
+        if (account) {
+          server = account.incomingServer;
+        }
+      }
+    }
+
+    let hintForIdentity = "";
+    if (type == Components.interfaces.nsIMsgCompType.ReplyToList) {
+      hintForIdentity = hint;
+    } else if (
+      type == Components.interfaces.nsIMsgCompType.Template ||
+      type == Components.interfaces.nsIMsgCompType.EditTemplate ||
+      type == Components.interfaces.nsIMsgCompType.EditAsNew
+    ) {
+      hintForIdentity = hdr.author;
+    } else {
+      // XAppToSupport : we add "findXApparentlyToIdentityEmail()" to the line bellow just before "hint"
+      // It is necessary if we respond to an email in which we are not in the list of recipients
+      // (the recipient email is only in X-Apparently-To)
+      // NB: hint = the identity of the header : "Delivered-to:"
+      hintForIdentity = hdr.recipients + "," + hdr.ccList + "," + findXApparentlyToIdentityEmail() + "," + hint;
+    }
+
+    if (server) {
+      // XAppToSupport : We add the identity to the server only in the case we actually respond
+      //  (in that case the type is not set to "undefined")
+      if (type)
+        addXApparentlyToToServer(server);
+      identity = this.getIdentityForServer(server, hintForIdentity);
+    }
+
+    if (!identity) {
+      identity = this.getBestIdentity(
+        MailServices.accounts.allIdentities,
+        hintForIdentity,
+        true
+      );
+    }
+    return identity;
+  }
 };
 
 window.addEventListener('load', CorrectIdentity.init, false);
